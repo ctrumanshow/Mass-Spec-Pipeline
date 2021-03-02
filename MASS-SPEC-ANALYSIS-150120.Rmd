@@ -1,0 +1,964 @@
+---
+title: "Analysing Mass Spec Data"
+output:
+  pdf_document: default
+  html_notebook: default
+  html_document:
+    df_print: paged
+---
+
+This is an R Markdown document to show how I have analysed my mass spectroscopy data.
+Author: Catherine Truman
+Date: 25/10/2019
+
+First, we: 
+(1) import the libraries we need
+(2) set up our directory (replace this text with the directories and file paths of your files)
+(3) read in our data and databases we will reference later on 
+
+Note, we change the names of columns - make sure the right names are called for your database
+
+```{r}
+
+library(tidyverse)
+library(ggplot2)
+library(dplyr)
+library(readr)
+library(ggalluvial)
+library(ggrepel)
+#BiocManager::install("hpar")
+library(hpar)
+require(knitr)
+
+WD <- paste("C:/Users/Greye/Dropbox/DPHIL PHD UPDATED/DATA/MASS SPECTRONOMY/REPLICATES/",
+            "USING REP 1 AND 2", sep="")
+knitr::opts_knit$set(root.dir = normalizePath(WD)) # change this to show your own working 
+#directory
+
+NCBI_DB <- read.csv(file.path(WD, "NCBI_HIV_INT_DB.csv"), stringsAsFactors = F) 
+# NCBI HIV database
+MS_Data <- read.csv(file.path(WD, "2RepRawData.csv"), stringsAsFactors = F, header = T) 
+# MS database
+MS_Data <- MS_Data %>% rename("AdjPValue" = "adj.P.Val", "Significance" = "sig", 
+                              "LogFC" = "logFC", "GeneNames" = "Row.names") 
+# Give common column names
+```
+
+Let's count how many hits we have of significance and summarise in a table
+
+```{r}
+SigHits <- (MS_Data$GeneNames[MS_Data$Significance  == "+"])
+NoSigHits <- length(SigHits)
+
+DoubleSigHits <- (MS_Data$GeneNames[MS_Data$Significance == "++"])
+NoDoubleSigHits <- length(DoubleSigHits)
+
+OtherHits <- (MS_Data$GeneNames[MS_Data$Significance == ""| MS_Data$Significance == "-" ])
+NoOtherHits <- length(OtherHits)
+
+Total = NoSigHits + NoDoubleSigHits + NoOtherHits
+
+Summary <- cbind(NoOtherHits, NoSigHits, NoDoubleSigHits, Total)
+colnames(Summary)[1:4] <- c('Other', '+','++', 'Total')
+Summary
+```
+
+Now let's make a volcano plot.
+Let's apply a log10 p-value to suit the scale.
+We also need to feed the function our variables.
+Replace these with your viral genes, IP protein and conditions of interest.
+(!) Make sure your protein names match what is in the MS table exactly
+
+```{r}
+MS_Data$Difference <- -log10(MS_Data$AdjPValue)
+
+Viral_Proteins <- c('MATRIX-p17', 'P6-GAG', 'CA-p24', 'P2', 'NC-p17', 'RT-p51', 
+                    'Rnase-p15', 'Integrase-P31', 'VIF', 'VPR', 'TAT', 'mCherry-T2A')
+Bait_Protein <- c('REV-FLAG-3xMyc') # Replace these with your protein names
+Positive <- 'REV-FLAG-3xMyc'
+Negative <- 'mCherry-Nef'
+
+```
+
+Next, we make a function to produce a volcano plot. Study it carefully.
+You give it your MS_Data, list of proteins and conditions and it 
+colours points based on sigificance.
+You can comment out or in (using hash) the things you want labelled
+
+```{r}
+MakeVPTable <- function(Database, Viral_Proteins, Bait_Proteins, Positive, Negative){ 
+  
+  ### COLOURING
+  Database$"Colouring" <- "" # In this column, we'll add labels to points we want coloured
+  Database$Colouring[Database$GeneNames %in% DoubleSigHits] <- 'P Value < 0.01'
+  Database$Colouring[Database$GeneNames %in% SigHits] <- 'P Value < 0.1'
+  Database$Colouring[Database$GeneNames %in% OtherHits] <- 'Host'
+  Database$Colouring[Database$GeneNames %in% Viral_Proteins] <- 'Viral'
+  Database$Colouring[Database$GeneNames %in% Bait_Protein] <- 'Bait'
+  Point_Colours <- c('#A7AFB540',"#FF0000", "#000000", "#005AB540", "#00736840")
+  Database$Colouring <- factor(Database$Colouring, levels=c('Host', 
+                                                            'Viral', 'Bait', 
+                                                            'P Value < 0.1', 'P Value < 0.01'))
+##008E8040
+  ### LABELLING
+  Database$"Labelling" <- "" # In this column, we add labels to points we want labelled
+  
+  # Label P < 0.01, viral and IP proteins
+ # Database$Labelling[Database$GeneNames %in% DoubleSigHits] <- 
+  #Database$GeneNames[Database$GeneNames %in% DoubleSigHits]
+#  Database$Labelling[Database$GeneNames %in% Viral_Proteins] <- 
+  #Database$GeneNames[Database$GeneNames   %in% Viral_Proteins]
+ Database$Labelling[Database$GeneNames %in% Bait_Protein] <- 'Rev-FLAG'
+  #Database$GeneNames[Database$GeneNames     %in% Bait_Protein]
+
+  # Label P < 0.1
+# Database$Labelling[Database$GeneNames %in% SigHits] <- 
+  #Database$GeneNames[Database$GeneNames %in%     SigHits]
+  
+  # Remove RPS/RPL proteins  
+ # Database$Labelling[grep("RPL|RPS", Database$Labelling)] <- ""
+  
+  # Remove viral proteins  
+  Matches <<- paste(unique(grep(paste(Viral_Proteins,collapse="\\b|\\b"), 
+                                Database$Labelling, value=TRUE, ignore.case=FALSE)), 
+                    collapse="|")
+#  Database$Labelling <- ifelse(grepl(Matches, Database$Labelling), '', Database$Labelling)
+  
+  # Label only viral proteins
+ Database$Labelling <- ifelse(grepl(Matches, Database$Labelling), Database$Labelling, '')
+  
+  # Label only RPS/RPL proteins
+ #Database$Labelling <- ifelse(grepl("RPL|RPS", Database$Labelling), Database$Labelling, '')
+  
+  Database <<- Database
+  
+  VP = ggplot(Database, aes(LogFC, Difference, color = Database$Colouring)) + 
+    geom_point(shape = 16, size = 2, show.legend = FALSE) + theme_classic() + 
+    theme(text = element_text(size = 0)) + scale_colour_manual(values = Point_Colours) +
+    ggrepel::geom_text_repel(label=Database$Labelling, size = 3, 
+                             box.padding = unit(0.1, "lines"),
+    point.padding = unit(0.1, "lines"), segment.size = 0.5, 
+    segment.color="black", colour="black") + 
+    geom_hline( yintercept=0, linetype="dashed", size=0.3, colour="black") + 
+    geom_vline( xintercept=0, linetype="dashed", size=0.3, colour="grey") +
+    ggtitle(paste0(Positive, " versus ", Negative)) + 
+    theme(plot.title = element_text(hjust=0.5)) +
+    xlab("log2 Fold Change") + ylab("-log10 P Value") + 
+    geom_hline( yintercept=1, linetype="dashed", size=0.3, colour="grey") +
+    geom_hline( yintercept=2, linetype="dashed", size=0.3, colour="grey") + 
+    theme(legend.position = c(.9, .22)) +    theme(legend.title = element_blank()) +
+    theme(legend.text=element_text(size=11)) + theme(axis.text=element_text(size=12),
+        axis.title=element_text(size=13,face="bold")) + theme(plot.title=element_text(size=0, face="bold")) +
+    theme(legend.background=element_blank())
+  
+
+return(VP)
+}
+```
+
+Finally, let's run the function with our parameters. We should get back a plot.
+
+```{r}
+MakeVPTable(MS_Data, Viral_Proteins, Bait_Proteins, "Rev-FLAG-3xMyc", "mCherry-Nef")
+```
+
+What the code originally made was a little.. overcrowded.
+You might notice some lines of code which are modifiable.
+These can be commented out using a hashtag, meaning they will not be processed.
+This can allow you to label more specifically.
+
+Finally, let's save.  
+
+```{r}
+ggsave('Poster.pdf', plot=last_plot(), path = WD, dpi=700)
+ggsave('Poster.png', plot=last_plot(), width=3, height=3, dpi=700, scale=1, path = WD)
+ggsave('Poster.png', plot=last_plot(), scale=0.5, dpi=700, path = WD)
+```
+
+Now we have a lot of hits, but we need a candidate list. How do we select?
+We have three parameters:
+-P Value
+-Fold Change
+-Rev intensity
+
+Let's remind ourselves what our data looks like at a glance.
+
+```{r}
+Summary
+```
+Looks like we have 100 proteins identified at a P Value of <0.01. In my case, lots of these are ribosomal.
+We don't care about those. Let's segment our list by P Value < 0.01 and remove ribosomal hits.
+Then let's calculate the average Rev intensity. if you have a different number of replicates, change the code!
+Finally, we select only the columns we're interested in and sort by intensity. 
+
+```{r}
+MS_DataP001 <- MS_Data[MS_Data$Significance == '++', ]
+MS_DataP001 <- MS_DataP001[!grepl("RPL|RPS", MS_DataP001$GeneNames), ]
+MS_DataP001 <- MS_DataP001[!grepl(Positive, MS_DataP001$GeneNames), ]
+MS_DataSig <- MS_Data[MS_Data$Significance == '+' | MS_Data$Significance == '++' , ]
+#MS_DataSig <- MS_DataSig[!grepl("RPL|RPS", MS_DataSig$GeneNames), ]
+
+AveRevInt <- data.frame(Means=rowMeans(MS_DataP001[,5:6])) 
+MS_DataP001 <- cbind(MS_DataP001, AveRevInt$Means)
+colnames(MS_DataP001)[13] <- 'Means'
+library(dplyr)
+MS_DataP001 <- MS_DataP001 %>% select('GeneNames', 'LogFC', 'AdjPValue', 'Significance', 'Means')
+Hits <- MS_DataP001 %>% arrange(desc(Means))  %>% top_n(40) %>% filter(LogFC > 4)
+Hits
+
+```
+You'll see we've included our IP protein, which is a good reference for intensity. 
+These are our top hits! 
+But maybe some of these are already top interactors. 
+Let's look at the data at a bigger glance.
+We'll take all significant interactors and get some data about them.
+First, we extract all annotaiton types from the NCBI HIV database attributed to Rev and get a list of lists 
+
+```{r}
+MS_DataSig <- MS_Data[MS_Data$Significance == '++' | MS_Data$Significance == '+', ]
+'%!in%' <- function(x,y)!('%in%'(x,y))
+
+Interaction <- c("binds", "interacts with")
+RevBinders <- unique(NCBI_DB %>% select(HIV.1_Prot_Name, Keyword, Human_GeneSymbol) %>%
+                       filter(HIV.1_Prot_Name == "Rev", Keyword %in% Interaction) %>%
+                       select(Human_GeneSymbol))
+
+RevAffiliated <- unique(NCBI_DB %>% select(HIV.1_Prot_Name, Keyword, Human_GeneSymbol) %>%
+                          filter(HIV.1_Prot_Name == "Rev") %>% select(Human_GeneSymbol))
+RevAffiliated <- RevAffiliated$Human_GeneSymbol[!RevAffiliated$Human_GeneSymbol %in%
+                                                  RevBinders$Human_GeneSymbol]
+
+MS_DataSig$RevBinder <- ""
+MS_DataSig$RevAffiliated <- ""
+MS_DataSig$HIVAffiliated <- ""
+MS_DataSig$RevBinder[MS_DataSig$GeneNames %in% RevBinders$Human_GeneSymbol] <- '+'
+NoRevBinders <- length(MS_DataSig$RevBinder[MS_DataSig$GeneNames %in% RevBinders$Human_GeneSymbol])
+MS_DataSig$RevAffiliated[MS_DataSig$GeneNames %in% RevAffiliated] <- '+'
+NoRevAff <- length(MS_DataSig$RevAffiliated[MS_DataSig$GeneNames %in% RevAffiliated])
+
+HIVAffiliated <- NCBI_DB %>% filter(!HIV.1_Prot_Name == "Rev") %>% 
+  select(HIV.1_Prot_Name, Keyword, Human_GeneSymbol)
+HIVAffiliated <- unique(HIVAffiliated[c("Human_GeneSymbol", "Keyword", "HIV.1_Prot_Name")])
+HIVAffiliated <- HIVAffiliated$Human_GeneSymbol[!HIVAffiliated$Human_GeneSymbol %in%
+                                                  RevBinders$Human_GeneSymbol]
+HIVAffiliated <- HIVAffiliated[!HIVAffiliated %in% RevAffiliated]
+MS_DataSig$HIVAffiliated[MS_DataSig$GeneNames %in% HIVAffiliated] <- '+'
+NoHIVAff <- length(MS_DataSig$HIVAffiliated[MS_DataSig$GeneNames %in% HIVAffiliated])
+
+print(paste0("Of ",length(MS_DataSig$GeneNames),
+             " significantly enriched proteins in my ", Positive, 
+             " IP, there are ",NoHIVAff," proteins previously linked to HIV-1 and ",
+             NoRevAff," which have been linked to Rev, with a final ",NoRevBinders,
+             " having a direct interaction with ",Positive,"."))
+
+
+
+```
+
+
+Let's make this into a Sankey diagram
+
+```{r}
+
+
+SankeyRevAffiliated <- NCBI_DB %>% select(HIV.1_Prot_Name, Keyword, Human_GeneSymbol) %>%
+  filter(HIV.1_Prot_Name == "Rev") %>% select(Human_GeneSymbol, Keyword)
+er <- SankeyRevAffiliated[SankeyRevAffiliated$Human_GeneSymbol %in% MS_DataSig$GeneNames,]
+results <- as.data.frame(summarise(group_by(er,Human_GeneSymbol,Keyword),count =n()))
+results$KeywordFactor <- as.factor(results$Keyword)
+results$KeywordFactor <- relevel(results$KeywordFactor, c("binds"))
+results$KeywordFactor <- relevel(results$KeywordFactor, c("interacts with"))
+levels(results$KeywordFactor)
+
+results[results$GeneLevels <- factor(results$Human_GeneSymbol),]
+class(results$GeneLevels)
+
+plot.GO.MF <- ggplot(results) + aes(y = count, axis1 = KeywordFactor, axis2 = GeneLevels) +
+  geom_alluvium(aes(fill=Keyword), width = 1/12) + 
+  geom_stratum(width=1/12, fill="grey", color="white") + 
+  scale_x_discrete(limits = c("Keyword", "Human_GeneSymbol"), expand = c(.05, .05)) + 
+  theme_bw() + #scale_fill_manual(values=cls) + 
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+                                                                                          axis.title.y=element_blank(), axis.text.y=element_blank(), axis.ticks.y=element_blank())
+plot.GO.MF + theme(legend.position = "none") + 
+  geom_text(label.strata=T, stat = "stratum",  size= 2)#, direction="y", nudge_x=.5)
+
+
+```
+
+```{r}
+
+
+ggsave('Sankey2.pdf', plot=last_plot(), path = WD, dpi=1700)
+
+```
+Let's make a doughnut
+```{r}
+
+
+data <- data.frame(
+  category=c("Rev Binders", "Rev Affiliated", "HIV Affiliated", "Other"),
+  count=c(NoRevBinders, NoRevAff, NoHIVAff, 107)
+)
+data$fraction = data$count / sum(data$count)
+data$ymax = cumsum(data$fraction)
+data$ymin = c(0, head(data$ymax, n=-1))
+data$labelPosition <- (data$ymax + data$ymin) / 2
+#data$label <- paste0(data$category, "\n value: ", data$count)
+
+doughnut <- ggplot(data, aes(ymax=ymax, ymin=ymin, xmax=4, xmin=3, fill=category)) +
+  geom_rect() +
+  scale_fill_brewer(palette=4) +
+  coord_polar(theta="y") +
+ # geom_label( x=3.5, aes(y=labelPosition, label=label), size=3) +
+  xlim(c(2, 4)) +
+  theme_void() + theme(legend.position="bottom")
+
+doughnut
+
+  
+```
+
+Let's save
+
+```{r}
+ggsave('DoughnutNoLabel2.pdf', plot=last_plot(), path = WD, dpi=1700)
+```
+
+```{r}
+#MS_DataSig <- MS_Data[MS_Data$Significance == '+' | MS_Data$Significance == '++' , ]
+library(stringr)
+data("hpaSubcellularLoc")
+Loc <- as.data.frame(hpaSubcellularLoc)
+Loc$IDs <- as.vector(droplevels(Loc$Gene))
+colnames(Loc)[12] <- "IDs"
+Loc <- Loc[Loc$Reliability == "Approved" | Loc$Reliability == "Supported" | 
+             Loc$Reliability == "Enhanced"  ,]
+
+MS_DataSig$ID <- ""
+MS_DataSig$Localisation <- ""
+for(i in 1:length(MS_DataSig$GeneNames)){
+  if(MS_DataSig$GeneNames[i] %in% Loc$Gene.name){
+    x <- match(MS_DataSig$GeneNames[i], Loc$Gene.name)
+    MS_DataSig$ID[i] <- Loc$IDs[x]
+    MS_DataSig$Localisation[i] <- as.vector(str_remove_all(droplevels(Loc$GO.id[x]),
+                                                           "\\WGO:\\d\\d\\d\\d\\d\\d\\d\\W"))
+  }
+}
+
+
+
+Nuclear_Membrane <- 0 #
+Nuclear_Speckles <- 0 #
+Nuclear_Bodies <- 0 #
+Lipid_Droplets <- 0 #
+Peroxisomes <- 0 #
+Nucleoli <- 0 #
+Nucleoplasm <- 0 #
+Actin_filaments <- 0 #
+Centrosome <- 0 #
+Cytosol <- 0 #
+Mitochondria <- 0 #
+Microtubules <- 0 #
+Golgi_apparatus <- 0 # 
+Endoplasmic_reticulum <- 0 # 
+Vesicles <- 0 #
+Aggresome <- 0 #
+Cytoplasmic_Bodies = 0 #
+
+for(i in 1:length(MS_DataSig$Localisation)){
+  ifelse(grepl("Mitochondria", MS_DataSig$Localisation[i]), 
+         Mitochondria <- Mitochondria + 1, "Mitochondria" == "Mitochondria")
+  
+  ifelse(grepl("Nucleoplasm", MS_DataSig$Localisation[i]), 
+         Nucleoplasm <- Nucleoplasm + 1, "Nucleoplasm" == "Nucleoplasm")
+  
+  ifelse(grepl("Cytosol", MS_DataSig$Localisation[i]), 
+         Cytosol <- Cytosol + 1, "Cytosol" == "Cytosol")
+  
+  ifelse(grepl("Nucleoli", MS_DataSig$Localisation[i]), 
+         Nucleoli <- Nucleoli + 1, "Nucleoli" == "Nucleoli")
+  
+  ifelse(grepl("Centrosome", MS_DataSig$Localisation[i]), 
+         Centrosome <- Centrosome + 1, "Centrosome" == "Centrosome")
+  
+  ifelse(grepl("Vesicles", MS_DataSig$Localisation[i]), 
+         Vesicles <- Vesicles + 1, "Vesicles" == "Vesicles")
+  
+  ifelse(grepl("Endoplasmic", MS_DataSig$Localisation[i]), 
+         Endoplasmic_reticulum <- Endoplasmic_reticulum + 1, 
+         "Endoplasmic_reticulum" == "Endoplasmic_reticulum")
+  
+    ifelse(grepl("Actin", MS_DataSig$Localisation[i]), 
+           Actin_filaments <- Actin_filaments + 1, "Actin_filaments" == "Actin_filaments")
+    
+    ifelse(grepl("Golgi", MS_DataSig$Localisation[i]), 
+           Golgi_apparatus <- Golgi_apparatus + 1, "Golgi_apparatus" == "Golgi_apparatus")
+    
+    ifelse(grepl("Microtubule", MS_DataSig$Localisation[i]), 
+           Microtubules <- Microtubules + 1, "Microtubules" == "Microtubules")
+    
+    ifelse(grepl("Nuclear membrane", MS_DataSig$Localisation[i]), 
+           Nuclear_Membrane <- Nuclear_Membrane + 1, "Nuclear_Membrane" == "Nuclear_Membrane")
+    
+    ifelse(grepl("Nuclear speckles", MS_DataSig$Localisation[i]),
+Nuclear_Speckles <- Nuclear_Speckles + 1, "Nuclear_Speckles" == "Nuclear_Speckles")
+    
+    ifelse(grepl("Nuclear bodies", MS_DataSig$Localisation[i]), 
+           Nuclear_Bodies <- Nuclear_Bodies + 1, "Nuclear_Bodies" == "Nuclear_Bodies")
+    
+    ifelse(grepl("Aggresome", MS_DataSig$Localisation[i]), 
+           Aggresome <- Aggresome + 1, "Aggresome" == "Aggresome")
+   
+   ifelse(grepl("Cytoplasmic bodies", MS_DataSig$Localisation[i]), 
+          Cytoplasmic_Bodies <- Cytoplasmic_Bodies + 1, "Cytoplasmic_Bodies" == "Cytoplasmic_Bodies")
+
+   ifelse(grepl("Lipid droplets", MS_DataSig$Localisation[i]), 
+          Lipid_Droplets <- Lipid_Droplets + 1, "Lipid_Droplets" == "Lipid_Droplets")
+   
+   ifelse(grepl("Peroxisomes", MS_DataSig$Localisation[i]), 
+          Peroxisomes <- Peroxisomes + 1, "Peroxisomes" == "Peroxisomes")
+}
+
+Total_Localisation <- sum(!is.na(MS_DataSig$Localisation))
+
+Localisation_Summary <- cbind(Centrosome, Vesicles, Nuclear_Membrane, 
+                              Golgi_apparatus, Microtubules, Nuclear_Speckles, 
+                              Nuclear_Bodies, Nucleoplasm, Cytosol, Nucleoli, 
+                              Lipid_Droplets, Peroxisomes, Endoplasmic_reticulum, 
+                              Cytoplasmic_Bodies, Aggresome, Mitochondria, 
+                              Actin_filaments, Total_Localisation)
+
+colnames(Localisation_Summary)[1:18] <- c('Centrosome', 'Vesicles',
+                                          'Nuclear Membrane', 'Golgi Apparatus', 
+                                          'Mirotubules', 'Nuclear Speckles', 
+                                          'Nuclear Bodies', 'Nucleoplasm', 'Cytosol', 
+                                          'Nucleoli', 'Lipid_Droplets', 'Peroxisomes', 
+                                          'Endoplasmic Reticulum', 'Cytoplasmic Bodies',
+                                          'Aggresome','Mitochondria','Actin Filaments','Total')
+Localisation_Summary
+
+
+```
+Comparing to Manuel's dataset...
+
+```{r}
+
+capsid <- read.csv('C:/Users/Greye/Dropbox/DPHIL PHD UPDATED/DATA/MASS SPECTRONOMY/REPLICATES/USING REP 1 AND 2/Manuel_Full.csv', header=T, stringsAsFactors = F)
+Marko24 <- read.csv('C:/Users/Greye/Dropbox/DPHIL PHD UPDATED/PROGRAMMING + SCRIPTING/R PROGRAMMING/RESOURCES/MARKO_HIV-24vsMock_Significant.csv', header=T, stringsAsFactors = F)
+Marko56 <- read.csv('C:/Users/Greye/Dropbox/DPHIL PHD UPDATED/PROGRAMMING + SCRIPTING/R PROGRAMMING/RESOURCES/MARKO_HIV-56vsMock_Significant.csv', header=T, stringsAsFactors = F)
+
+merko <- read.csv('C:/Users/Greye/Dropbox/DPHIL PHD UPDATED/DATA/MASS SPECTRONOMY/REPLICATES/USING ALL 3 REPLICATES/MS RESULTS/RevFlgMyc_R/BASIC/Marko_HIVsupT1_diff_hour56_mock.csv', stringsAsFactors = F, header=T)
+
+morko <- read.csv('C:/Users/Greye/Dropbox/DPHIL PHD UPDATED/DATA/MASS SPECTRONOMY/REPLICATES/USING ALL 3 REPLICATES/MS RESULTS/RevFlgMyc_R/BASIC/Marko_HIVsupT1_diff_hour24_mock.csv', stringsAsFactors = F, header=T)
+
+C:\Users\Greye\Dropbox\DPHIL PHD UPDATED\DATA\MASS SPECTRONOMY\REPLICATES\USING ALL 3 REPLICATES\MS RESULTS\RevFlgMyc_R\BASIC
+
+#Chen <- read.csv('C:/Users/Greye/Dropbox/DPHIL PHD UPDATED/PROGRAMMING + SCRIPTING/R #PROGRAMMING/RESOURCES/MARKO_HIV-56vsMock_Significant.csv', header=T, stringsAsFactors = F)
+Morgan <- read.csv('C:/Users/Greye/Dropbox/DPHIL PHD UPDATED/PROGRAMMING + SCRIPTING/R PROGRAMMING/RESOURCES/MORGAN_HIV_Unsure.csv', header=T, stringsAsFactors = F)
+sinv <- read.csv('C:/Users/Greye/Dropbox/DPHIL PHD UPDATED/PROGRAMMING + SCRIPTING/R PROGRAMMING/RESOURCES/MGM_SINV_RIC_18hpi_vs_mock_significant.csv', header=T, stringsAsFactors = F)
+vpr <- read.csv('C:/Users/Greye/Dropbox/DPHIL PHD UPDATED/PROGRAMMING + SCRIPTING/R PROGRAMMING/RESOURCES/Vpr_Greenwood_2018.csv', header=T, stringsAsFactors = F)
+
+MS_DataSig$Capsid = ""
+MS_DataSig$Marko24 = ""
+MS_DataSig$Marko56 = ""
+#MS_DataSig$Chen = ""
+MS_DataSig$Morgan = ""
+MS_DataSig$Sinv = ""
+MS_DataSig$HIV.DelVpr = ""
+
+MS_DataSig$Capsid[MS_DataSig$GeneNames %in% capsid$Gene.names] <- '+'
+Manuel <- unique(MS_DataSig$ID[MS_DataSig$Capsid == '+'])
+
+MS_DataSig$Marko24[MS_DataSig$ID %in% Marko24$ENSGid] <- '+'
+Marko24hits <- unique(MS_DataSig$GeneNames[MS_DataSig$Marko24 == '+'])
+
+MS_DataSig$Marko56[MS_DataSig$ID %in% Marko56$ENSGid] <- '+'
+Marko56hits <- unique(MS_DataSig$GeneNames[MS_DataSig$Marko56 == '+'])
+
+MS_DataSig$Sinv[MS_DataSig$ID %in% sinv$ENSGid] <- '+'
+SINVhits <- unique(MS_DataSig$GeneNames[MS_DataSig$Sinv == '+'])
+
+#MS_DataSig$Chen[MS_DataSig$ID %in% Chen$ENSGid] <- '+'
+#Chenhits <- unique(MS_DataSig$GeneNames[MS_DataSig$Chen == '+'])
+
+sig_Vpr <- vpr[vpr$q.Value..Vpr.WT <= 0.01, ]
+MS_DataSig$HIV.DelVpr[MS_DataSig$GeneNames %in% sig_Vpr$Gene.name] <- '+'
+vprhits <- unique(MS_DataSig$GeneNames[MS_DataSig$HIV.DelVpr == '+'])
+
+
+MS_DataSig$vpr[MS_DataSig$ID %in% Chen$ENSGid] <- '+'
+#Chenhits <- unique(MS_DataSig$GeneNames[MS_DataSig$Chen == '+'])
+
+All_Overlap_MarkoCT <- c(Marko56hits, Marko24hits)
+All_Overlap_MarkoCT <- unique(All_Overlap_MarkoCT) 
+
+MarkoCatSinv <- MS_DataSig$GeneNames[MS_DataSig$Marko24 == '+'& MS_DataSig$Marko56 == '+' & MS_DataSig$Sinv == '+']
+
+MS_DataSig <- as_tibble(MS_DataSig)
+write.csv(MS_DataSig, 'C:/Users/Greye/Dropbox/DPHIL PHD UPDATED/DATA/MASS SPECTRONOMY/REPLICATES/USING REP 1 AND 2/TwoRepComparisonsFINAL080120.csv', sep=";")
+
+All_Overlap_MarkoCT
+
+name <- MS_DataSig$GeneNames[MS_DataSig$RevBinder == '' & MS_DataSig$RevAffiliated == '' & MS_DataSig$HIVAffiliated == ''
+                             & MS_DataSig$GeneNames %in% All_Overlap_MarkoCT]
+
+```
+
+
+
+
+
+Trying to understand how to do correlation plots nd make r2 values
+```{r}
+#DOWNLOAD EXMAPLE
+r2_example <- read_csv("r2_example.csv")
+colnames(r2_example)[1:2] <- c("x", "y")
+
+#WITH GGPLOT
+p <- ggplot(data = r2_example, aes(x = x, y = y)) +
+            geom_smooth(method = "lm", se=FALSE, color="black", formula = y ~ x) +
+            geom_point()
+
+lm_eqn <- function(df){
+    m <- lm(y ~ x, df);
+    eq <- substitute(italic(y) == a + b %.% italic(x)*","~~italic(r)^2~"="~r2, 
+         list(a = format(unname(coef(m)[1]), digits = 2),
+              b = format(unname(coef(m)[2]), digits = 2),
+             r2 = format(summary(m)$r.squared, digits = 3)))
+    as.character(as.expression(eq));
+}
+
+p1 <- p + geom_text(x = 25, y = 1, label = lm_eqn(r2_example), parse = TRUE)
+#It's 0.954
+
+#WITH BASIC R GRAPHS
+with(r2_example, plot(x, y)) + abline(fit <- lm(r2_example$x ~ r2_example$y, data=r2_example), col='red') + legend("topright", bty="n", legend=paste("R2 is",
+                                                                                                                                                     format(summary(fit)$adj.r.squared, digits=4)))
+#is 0.9444
+
+
+
+#Kind of works. Let's go.
+
+
+```
+
+Comparing my data to other interactomes...
+
+```{r}
+# GREENWOOD VS. MINE
+
+#Gather relevant columns
+Vpr_Analysis <- vpr[,c(1,5,8,9)]
+liz <- MS_Data[,c(2,7)]
+sig_Vpr <- Vpr_Analysis$Gene.name[Vpr_Analysis$q.Value.WT.Mock <= 0.01]
+#Get genes shared in our datasets
+genes <- as.vector(MS_Data$GeneNames[MS_Data$GeneNames %in% Vpr_Analysis$Gene.name])
+
+#Remove genes not shared
+liz <- liz[liz$GeneNames %in% genes,]
+
+#Make column
+liz$vprfc <- ""
+
+#for all genes shared, take vpr fold change
+for(i in 1:length(genes)){
+  if(genes[i] %in% Vpr_Analysis$Gene.name){
+    a <- Vpr_Analysis$Log2..WT.Mock.[Vpr_Analysis$Gene.name %in% genes[i]]
+    liz$vprfc[liz$GeneNames %in% genes[i]] <- a
+  }
+}
+
+#FOR COLORING: SIGNIFICANT IN WHICH
+liz$sig <- ""
+for(i in 1:length(liz$GeneNames)){
+  if(liz$GeneNames[i] %in% MS_DataSig$GeneNames && !liz$GeneNames[i] %in% sig_Vpr) {
+      liz$sig[i] <- "Significant in Rev IP"
+  } else if(!liz$GeneNames[i] %in% MS_DataSig$GeneNames && liz$GeneNames[i] %in% sig_Vpr){
+      liz$sig[i] <-"Significant in Greenwood MS"
+  } else if(liz$GeneNames[i] %in% MS_DataSig$GeneNames && liz$GeneNames[i] %in% sig_Vpr){
+      liz$sig[i] <-"Significant in both"
+  } else if(liz$sig[i] == ""){
+     liz$sig[i] <-"Not significant"
+  }
+}
+
+
+
+
+#FOR LABELLING: OUTLIERS 
+liz$outlierLabels <- ""
+for(i in 1:length(liz$outlierLabels)){
+ if(liz$sigLabels[i] != "" && liz$y[i] > -0.5 && liz$y[i] < .5){
+   liz$outlierLabels[[i]] <- ""
+ } else if(liz$sigLabels[i] == "" && liz$x[i] > 3) {
+   liz$outlierLabels[[i]] <- liz$GeneNames[[i]]
+  } else {
+   liz$outlierLabels[[i]] <- liz$sigLabels[[i]]
+ }
+}
+
+
+#LETS PLOT
+colnames(liz)[2:3] <- c("x", "y")
+liz$y <- as.numeric(liz$y)
+
+#FUNCTION TO OUTPUT R VALUE
+lm_eqn <- function(df){
+    m <- lm(y ~ x, df);
+    eq <- substitute(italic(y) == a + b %.% italic(x)*","~~italic(r)^2~"="~r2, 
+         list(a = format(unname(coef(m)[1]), digits = 2),
+              b = format(unname(coef(m)[2]), digits = 2),
+             r2 = format(summary(m)$r.squared, digits = 3)))
+    as.character(as.expression(eq));
+}   # ADD TO MAKE R ANNOTATION: geom_smooth(method = "lm", se=FALSE, color="black", formula = y ~ x) +
+
+#WITH GGPLOT
+p <- ggplot(data = liz, aes(x = x, y = y, color = liz$sig)) + geom_point() + theme_bw() + labs(x = "log2 fold change \nRFM/mCherry", y="log2 fold change \nHIV/Mock\n Greenwood et al (2018)") + scale_y_continuous(breaks=seq(-1,1,0.5))
+.labs <- liz$outlierLabels
+#p <- p + geom_text(x = 25, y = 1, label = lm_eqn(liz), parse = TRUE) 
+p2 <- p + geom_label_repel(aes(label = .labs), size = 3)
+p2
+
+
+```
+
+# MARKO VS. MINE
+```{r}
+
+#Gather relevant columns
+Marko_Analysis <- merko[,c(2,3,4,7)]
+carmel <- MS_Data[,c(2,7)]
+sig_merko <- Marko_Analysis$symbol[Marko_Analysis$sig != ""]
+merko<- merko[merko$log2FC != "", ]
+merko <- merko[1:804,]
+
+#Get genes shared in our datasets
+genes <- as.vector(MS_Data$GeneNames[MS_Data$GeneNames %in% Marko_Analysis$symbol])
+carmel<- carmel[carmel$GeneNames %in% genes,]
+
+#Make column
+carmel$MarkoFC <- ""
+
+#for all genes shared, take marko56 fold change
+for(i in 1:length(genes)){
+  if(genes[i] %in% Marko_Analysis$symbol){
+    a <- Marko_Analysis$log2FC[Marko_Analysis$symbol %in% genes[i]]
+    carmel$MarkoFC[carmel$GeneNames%in% genes[i]] <- a
+  }
+}
+
+#FOR COLORING: SIGNIFICANT IN WHICH
+carmel$sig <- ""
+for(i in 1:length(carmel$GeneNames)){
+  if(carmel$GeneNames[i] %in% MS_DataSig$GeneNames && !carmel$GeneNames[i] %in% sig_merko) {
+      carmel$sig[i] <- "Significant in Rev/mCherry IP"
+  } else if(!carmel$GeneNames[i] %in% MS_DataSig$GeneNames && carmel$GeneNames[i] %in% sig_merko){
+      carmel$sig[i] <-"Significant in Marko 56/mock RIC"
+  } else if(carmel$GeneNames[i] %in% MS_DataSig$GeneNames && carmel$GeneNames[i] %in% sig_merko){
+      carmel$sig[i] <-"Significant in both"
+  } else if(carmel$sig[i] == ""){
+     carmel$sig[i] <-"Not significant"
+  }
+}
+
+
+
+
+#FOR LABELLING: OUTLIERS 
+carmel$outlierLabels <- ""
+for(i in 1:length(carmel$GeneNames)){
+ if(carmel$sig[i] == "Significant in both" && carmel$y[i] < -1 || carmel$y[i] > 1.5){ 
+   carmel$outlierLabels[[i]] <- carmel$GeneNames[i]
+   } else if(carmel$sig[i] == "Significant in both" && carmel$x[i] > 3) {
+   carmel$outlierLabels[[i]] <- carmel$GeneNames[i]
+ } else {
+  carmel$outlierLabels[i] <- ""
+ }}
+
+
+
+
+#LETS PLOT
+colnames(carmel)[2:3] <- c("x", "y")
+carmel$y <- as.numeric(carmel$y)
+carmel$x <- as.numeric(carmel$x)
+
+#FUNCTION TO OUTPUT R VALUE
+lm_eqn <- function(df){
+    m <- lm(y ~ x, df);
+    eq <- substitute(italic(y) == a + b %.% italic(x)*","~~italic(r)^2~"="~r2, 
+         list(a = format(unname(coef(m)[1]), digits = 2),
+              b = format(unname(coef(m)[2]), digits = 2),
+             r2 = format(summary(m)$r.squared, digits = 3)))
+    as.character(as.expression(eq));
+}   # ADD TO MAKE R ANNOTATION: geom_smooth(method = "lm", se=FALSE, color="black", formula = y ~ x) +
+
+#WITH GGPLOT
+Point_Colours <- c('#A7AFB540',"#FF0000", "#005AB540", "#00736840")
+p <- ggplot(data = carmel, aes(x = x, y = y, color=carmel$sig)) + geom_point(size=3, alpha=0.5) + theme_bw() + labs(x = "log2 fold change \nRFM/mCherry", y="log2 fold change \nHIV 56hpi/Mock\n RIC") + labs(colour= "Significance") 
+.labs <- carmel$outlierLabels
+#p <- p + geom_text(x = 25, y = 1, label = lm_eqn(liz), parse = TRUE) 
+p2 <- p + geom_label_repel(aes(label = .labs), size = 3, label.padding=0.15)
+
+
+p2
+```
+```{r}
+
+#Gather relevant columns
+Marko_Analysis <- merko[,c(2,3,4,7)]
+carmel <- MS_Data[,c(2,7)]
+sig_merko <- Marko_Analysis$symbol[Marko_Analysis$sig != ""]
+Marko_Analysis<- Marko_Analysis[Marko_Analysis$log2FC != "", ]
+
+
+#Get genes shared in our datasets
+genes <- as.vector(MS_Data$GeneNames[MS_Data$GeneNames %in% Marko_Analysis$symbol])
+carmel<- carmel[carmel$GeneNames %in% genes,]
+
+#Make column
+carmel$MarkoFC <- ""
+
+#for all genes shared, take marko56 fold change
+for(i in 1:length(genes)){
+  if(genes[i] %in% Marko_Analysis$symbol){
+    a <- Marko_Analysis$log2FC[Marko_Analysis$symbol %in% genes[i]]
+    carmel$MarkoFC[carmel$GeneNames%in% genes[i]] <- a
+  }
+}
+
+#FOR COLORING: SIGNIFICANT IN WHICH
+carmel$sig <- ""
+for(i in 1:length(carmel$GeneNames)){
+  if(carmel$GeneNames[i] %in% MS_DataSig$GeneNames && !carmel$GeneNames[i] %in% sig_merko) {
+      carmel$sig[i] <- "Significant in Rev/mCherry IP"
+  } else if(!carmel$GeneNames[i] %in% MS_DataSig$GeneNames && carmel$GeneNames[i] %in% sig_merko){
+      carmel$sig[i] <-"Significant in Marko 56/mock RIC"
+  } else if(carmel$GeneNames[i] %in% MS_DataSig$GeneNames && carmel$GeneNames[i] %in% sig_merko){
+      carmel$sig[i] <-"Significant in both"
+  } else if(carmel$sig[i] == ""){
+     carmel$sig[i] <-"Not significant"
+  }
+}
+
+
+#LETS PLOT
+colnames(carmel)[2:3] <- c("x", "y")
+carmel$y <- as.numeric(carmel$y)
+carmel$x <- as.numeric(carmel$x)
+
+
+#FOR LABELLING: OUTLIERS 
+carmel$outlierLabels <- ""
+for(i in 1:length(carmel$GeneNames)){
+ if(carmel$sig[i] == "Significant in both" && carmel$y[i] < -1 || carmel$y[i] > 1.5){ 
+   carmel$outlierLabels[[i]] <- carmel$GeneNames[i]
+   } else if(carmel$sig[i] == "Significant in both" && carmel$x[i] > 3) {
+   carmel$outlierLabels[[i]] <- carmel$GeneNames[i]
+ } else {
+  carmel$outlierLabels[i] <- ""
+ }}
+
+
+
+
+
+#FUNCTION TO OUTPUT R VALUE
+lm_eqn <- function(df){
+    m <- lm(y ~ x, df);
+    eq <- substitute(italic(y) == a + b %.% italic(x)*","~~italic(r)^2~"="~r2, 
+         list(a = format(unname(coef(m)[1]), digits = 2),
+              b = format(unname(coef(m)[2]), digits = 2),
+             r2 = format(summary(m)$r.squared, digits = 3)))
+    as.character(as.expression(eq));
+}   # ADD TO MAKE R ANNOTATION: geom_smooth(method = "lm", se=FALSE, color="black", formula = y ~ x) +
+
+#WITH GGPLOT
+Point_Colours <- c('#A7AFB540',"#FF0000", "#005AB540", "#00736840")
+p <- ggplot(data = carmel, aes(x = x, y = y, color=carmel$sig)) + geom_point(size=3, alpha=0.5) + theme_bw() + labs(x = "log2 fold change \nRFM/mCherry", y="log2 fold change \nHIV 56hpi/Mock\n RIC") + labs(colour= "Significance") 
+.labs <- carmel$outlierLabels
+#p <- p + geom_text(x = 25, y = 1, label = lm_eqn(liz), parse = TRUE) 
+p2 <- p + geom_label_repel(aes(label = .labs), size = 3, label.padding=0.15)
+
+
+p2
+
+```
+
+
+
+# MARKO 24 vs REV
+
+```{r}
+#Gather relevant columns
+Marko_Analysis <- morko[,c(2,3,4,7)]
+carmel <- MS_Data[,c(2,7)]
+sig_morko <- Marko_Analysis$symbol[Marko_Analysis$sig != ""]
+Marko_Analysis<- Marko_Analysis[Marko_Analysis$log2FC != "", ]
+Marko_Analysis <- Marko_Analysis[1:821,]
+
+#Get genes shared in our datasets
+genes <- as.vector(MS_Data$GeneNames[MS_Data$GeneNames %in% Marko_Analysis$symbol])
+carmel<- carmel[carmel$GeneNames %in% genes,]
+
+#Make column
+carmel$MarkoFC <- ""
+
+#for all genes shared, take marko56 fold change
+for(i in 1:length(genes)){
+  if(genes[i] %in% Marko_Analysis$symbol){
+    a <- Marko_Analysis$log2FC[Marko_Analysis$symbol %in% genes[i]]
+    carmel$MarkoFC[carmel$GeneNames%in% genes[i]] <- a
+  }
+}
+
+#FOR COLORING: SIGNIFICANT IN WHICH
+carmel$sig <- ""
+for(i in 1:length(carmel$GeneNames)){
+  if(carmel$GeneNames[i] %in% MS_DataSig$GeneNames && !carmel$GeneNames[i] %in% sig_merko) {
+      carmel$sig[i] <- "Significant in Rev/mCherry IP"
+  } else if(!carmel$GeneNames[i] %in% MS_DataSig$GeneNames && carmel$GeneNames[i] %in% sig_merko){
+      carmel$sig[i] <-"Significant in Marko 24/mock RIC"
+  } else if(carmel$GeneNames[i] %in% MS_DataSig$GeneNames && carmel$GeneNames[i] %in% sig_merko){
+      carmel$sig[i] <-"Significant in both"
+  } else if(carmel$sig[i] == ""){
+     carmel$sig[i] <-"Not significant"
+  }
+}
+
+colnames(carmel)[2:3] <- c("x", "y")
+carmel$y <- as.numeric(carmel$y)
+carmel$x <- as.numeric(carmel$x)
+
+
+#FOR LABELLING: OUTLIERS 
+carmel$outlierLabels <- ""
+for(i in 1:length(carmel$GeneNames)){
+ if(carmel$sig[i] == "Significant in both" && carmel$y[i] < -1 || carmel$y[i] > 1.5){ 
+   carmel$outlierLabels[[i]] <- carmel$GeneNames[i]
+   } else if(carmel$sig[i] == "Significant in both" && carmel$x[i] > 3) {
+   carmel$outlierLabels[[i]] <- carmel$GeneNames[i]
+ } else {
+  carmel$outlierLabels[i] <- ""
+ }}
+
+
+
+
+#LETS PLOT
+
+
+#FUNCTION TO OUTPUT R VALUE
+lm_eqn <- function(df){
+    m <- lm(y ~ x, df);
+    eq <- substitute(italic(y) == a + b %.% italic(x)*","~~italic(r)^2~"="~r2, 
+         list(a = format(unname(coef(m)[1]), digits = 2),
+              b = format(unname(coef(m)[2]), digits = 2),
+             r2 = format(summary(m)$r.squared, digits = 3)))
+    as.character(as.expression(eq));
+}   # ADD TO MAKE R ANNOTATION: geom_smooth(method = "lm", se=FALSE, color="black", formula = y ~ x) +
+
+#WITH GGPLOT
+Point_Colours <- c('#A7AFB540',"#FF0000", "#005AB540", "#00736840")
+p <- ggplot(data = carmel, aes(x = x, y = y, color=carmel$sig)) + geom_point(size=3, alpha=0.5) + theme_bw() + labs(x = "log2 fold change \nRFM/mCherry", y="log2 fold change \nHIV 24hpi/Mock\n RIC") + labs(colour= "Significance") 
+.labs <- carmel$outlierLabels
+#p <- p + geom_text(x = 25, y = 1, label = lm_eqn(liz), parse = TRUE) 
+p2 <- p + geom_label_repel(aes(label = .labs), size = 3, label.padding=0.15)
+
+
+p2
+```
+
+# MANUEL HIV Particle ric vs REV
+
+```{r}
+# Import dataset
+library(readr)
+MGM_HIVparticle_RIC <- read_csv("MGM_HIVparticle_RIC.csv")
+MGM_SINV_RIC_18hpi_vs_mock <- read_csv("MGM_SINV_RIC_18hpi_vs_mock.csv")
+
+#Gather relevant columns
+MGM1 <- MGM_HIVparticle_RIC[,c(4,5)]
+MGM1 <- MGM1[MGM1$significance != "", ]
+carmel <- MS_Data[,c(2,7)]
+MGM2 <- MGM_SINV_RIC_18hpi_vs_mock[,c(2,3)]
+MGM2 <- MGM2[MGM2$significance != "", ]
+
+
+#Get genes shared in our datasets
+genes_1 <- as.vector(MS_DataSig$GeneNames[MS_DataSig$GeneNames %in% MGM1$`Gene names`])
+genes_2 <- as.vector(MS_DataSig$GeneNames[MS_DataSig$GeneNames %in% MGM2$symbol])
+naji <- as.vector(MS_DataSig$GeneNames[MS_DataSig$GeneNames %in% naji$Symbol])
+
+carmel<- carmel[carmel$GeneNames %in% genes,]
+
+#Make column
+carmel$MarkoFC <- ""
+
+#for all genes shared, take marko56 fold change
+for(i in 1:length(genes)){
+  if(genes[i] %in% Marko_Analysis$symbol){
+    a <- Marko_Analysis$log2FC[Marko_Analysis$symbol %in% genes[i]]
+    carmel$MarkoFC[carmel$GeneNames%in% genes[i]] <- a
+  }
+}
+
+#FOR COLORING: SIGNIFICANT IN WHICH
+carmel$sig <- ""
+for(i in 1:length(carmel$GeneNames)){
+  if(carmel$GeneNames[i] %in% MS_DataSig$GeneNames && !carmel$GeneNames[i] %in% sig_merko) {
+      carmel$sig[i] <- "Significant in Rev/mCherry IP"
+  } else if(!carmel$GeneNames[i] %in% MS_DataSig$GeneNames && carmel$GeneNames[i] %in% sig_merko){
+      carmel$sig[i] <-"Significant in Marko 24/mock RIC"
+  } else if(carmel$GeneNames[i] %in% MS_DataSig$GeneNames && carmel$GeneNames[i] %in% sig_merko){
+      carmel$sig[i] <-"Significant in both"
+  } else if(carmel$sig[i] == ""){
+     carmel$sig[i] <-"Not significant"
+  }
+}
+
+colnames(carmel)[2:3] <- c("x", "y")
+carmel$y <- as.numeric(carmel$y)
+carmel$x <- as.numeric(carmel$x)
+
+
+#FOR LABELLING: OUTLIERS 
+carmel$outlierLabels <- ""
+for(i in 1:length(carmel$GeneNames)){
+ if(carmel$sig[i] == "Significant in both" && carmel$y[i] < -1 || carmel$y[i] > 1.5){ 
+   carmel$outlierLabels[[i]] <- carmel$GeneNames[i]
+   } else if(carmel$sig[i] == "Significant in both" && carmel$x[i] > 3) {
+   carmel$outlierLabels[[i]] <- carmel$GeneNames[i]
+ } else {
+  carmel$outlierLabels[i] <- ""
+ }}
+
+
+
+
+#LETS PLOT
+
+
+#FUNCTION TO OUTPUT R VALUE
+lm_eqn <- function(df){
+    m <- lm(y ~ x, df);
+    eq <- substitute(italic(y) == a + b %.% italic(x)*","~~italic(r)^2~"="~r2, 
+         list(a = format(unname(coef(m)[1]), digits = 2),
+              b = format(unname(coef(m)[2]), digits = 2),
+             r2 = format(summary(m)$r.squared, digits = 3)))
+    as.character(as.expression(eq));
+}   # ADD TO MAKE R ANNOTATION: geom_smooth(method = "lm", se=FALSE, color="black", formula = y ~ x) +
+
+#WITH GGPLOT
+Point_Colours <- c('#A7AFB540',"#FF0000", "#005AB540", "#00736840")
+p <- ggplot(data = carmel, aes(x = x, y = y, color=carmel$sig)) + geom_point(size=3, alpha=0.5) + theme_bw() + labs(x = "log2 fold change \nRFM/mCherry", y="log2 fold change \nHIV 24hpi/Mock\n RIC") + labs(colour= "Significance") 
+.labs <- carmel$outlierLabels
+#p <- p + geom_text(x = 25, y = 1, label = lm_eqn(liz), parse = TRUE) 
+p2 <- p + geom_label_repel(aes(label = .labs), size = 3, label.padding=0.15)
+
+
+p2
+```
