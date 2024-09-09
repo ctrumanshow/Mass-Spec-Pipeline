@@ -8,7 +8,7 @@ output:
 ---
 
 This is an R Markdown document to show how I have analysed my mass spectroscopy data.
-Author: Catherine Truman
+Author: Robin Truman
 Date: 25/10/2019
 
 First, we: 
